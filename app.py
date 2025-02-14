@@ -6,8 +6,6 @@ import cv2
 from PIL import Image, ImageOps
 import time
 from datetime import datetime
-import av
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 
 # Page configuration
 st.set_page_config(
@@ -61,23 +59,6 @@ def load_model():
     except Exception as e:
         st.error(f"Error loading model: {str(e)}")
         return None
-
-class VideoProcessor(VideoProcessorBase):
-    def __init__(self, interpreter):
-        self.interpreter = interpreter
-        self.face_detection = mp_face_detection.FaceDetection(
-            min_detection_confidence=0.5,
-            model_selection=1
-        )
-
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        image = frame.to_ndarray(format="bgr24")
-        
-        # Process the frame
-        processed_image, _, _ = detect_and_predict(Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)), 
-                                                 self.interpreter)
-        
-        return av.VideoFrame.from_ndarray(np.array(processed_image), format="bgr24")
 
 def draw_fancy_bbox(image, bbox, label, confidence, confidence_level):
     """
@@ -244,6 +225,27 @@ def detect_and_predict(image, interpreter):
     
     return Image.fromarray(image_np), faces_detected, processing_time
 
+def process_image(image):
+    """Process a single image and display results"""
+    try:
+        # Convert to RGB and process EXIF orientation if needed
+        image = image.convert("RGB")
+        image = ImageOps.exif_transpose(image)
+        
+        # Process image
+        processed_image, faces, proc_time = detect_and_predict(image, interpreter)
+        
+        # Display results in columns
+        col1, col2 = st.columns(2)
+        with col1:
+            st.image(image, caption="Original Image", use_container_width=True)
+        with col2:
+            st.image(processed_image, 
+                    caption=f"Detected Image ({faces} faces, {proc_time:.3f}s)",
+                    use_container_width=True)
+    except Exception as e:
+        st.error(f"Error processing image: {str(e)}")
+
 def main():
     # Sidebar for settings and statistics
     with st.sidebar:
@@ -267,51 +269,30 @@ def main():
             st.write(f"Without Mask: {no_mask_count}")
     
     # Main content
-    st.title("😷 Advanced Face Mask Detection System")
+    st.title("😷 Face Mask Detection System")
     st.markdown("""
-        This system uses AI to detect face masks in real-time video feeds and uploaded images.
+        This system uses AI to detect face masks in images.
         Choose your preferred input method below.
     """)
     
     # Tabs for different input methods
-    tab1, tab2 = st.tabs(["📹 Live Video", "📁 File Upload"])
+    tab1, tab2 = st.tabs(["📷 Camera Input", "📁 File Upload"])
     
     with tab1:
-        st.subheader("Real-time Detection")
-        webrtc_ctx = webrtc_streamer(
-            key="mask-detection",
-            video_processor_factory=lambda: VideoProcessor(interpreter),
-            rtc_configuration=RTCConfiguration(
-                {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
-            )
-        )
+        st.subheader("Camera Input")
+        camera_image = st.camera_input("Take a picture")
+        if camera_image:
+            image = Image.open(camera_image)
+            process_image(image)
     
     with tab2:
         st.subheader("Image Upload")
         uploaded_file = st.file_uploader("Upload an image", 
                                        type=["jpg", "jpeg", "png"],
                                        help="Supported formats: JPG, JPEG, PNG")
-        
         if uploaded_file:
-            try:
-                image = Image.open(uploaded_file)
-                image = image.convert("RGB")
-                image = ImageOps.exif_transpose(image)
-                
-                # Process image
-                processed_image, faces, proc_time = detect_and_predict(image, interpreter)
-                
-                # Display results in columns
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.image(image, caption="Original Image", use_container_width=True)
-                with col2:
-                    st.image(processed_image, 
-                            caption=f"Detected Image ({faces} faces, {proc_time:.3f}s)",
-                            use_container_width=True)
-                
-            except Exception as e:
-                st.error(f"Error processing image: {str(e)}")
+            image = Image.open(uploaded_file)
+            process_image(image)
 
 # Initialize model and run main function
 interpreter = load_model()
