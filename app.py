@@ -6,7 +6,8 @@ import cv2
 from PIL import Image, ImageOps
 import time
 from datetime import datetime
-import io
+import av
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 
 # Page configuration
 st.set_page_config(
@@ -61,6 +62,23 @@ def load_model():
         st.error(f"Error loading model: {str(e)}")
         return None
 
+class VideoProcessor(VideoProcessorBase):
+    def __init__(self, interpreter):
+        self.interpreter = interpreter
+        self.face_detection = mp_face_detection.FaceDetection(
+            min_detection_confidence=0.5,
+            model_selection=1
+        )
+
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        image = frame.to_ndarray(format="bgr24")
+        
+        # Process the frame
+        processed_image, _, _ = detect_and_predict(Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)), 
+                                                 self.interpreter)
+        
+        return av.VideoFrame.from_ndarray(np.array(processed_image), format="bgr24")
+
 def draw_fancy_bbox(image, bbox, label, confidence, confidence_level):
     """
     Draw a fancy bounding box with rounded corners and modern styling
@@ -101,27 +119,23 @@ def draw_fancy_bbox(image, bbox, label, confidence, confidence_level):
             cv2.ellipse(image, (x2 - corner_radius, y2 - corner_radius),
                        (corner_radius, corner_radius), 0, 0, 90, color, thickness)
     
-    # Draw the main lines
+    # Draw the main lines and corners
     cv2.line(image, (xmin + corner_radius, ymin), (xmax - corner_radius, ymin), color, thickness)
     cv2.line(image, (xmin + corner_radius, ymax), (xmax - corner_radius, ymax), color, thickness)
     cv2.line(image, (xmin, ymin + corner_radius), (xmin, ymax - corner_radius), color, thickness)
     cv2.line(image, (xmax, ymin + corner_radius), (xmax, ymax - corner_radius), color, thickness)
     
-    # Draw corners
-    draw_corner(xmin, ymin, xmax, ymax, 'top_left')
-    draw_corner(xmin, ymin, xmax, ymax, 'top_right')
-    draw_corner(xmin, ymin, xmax, ymax, 'bottom_left')
-    draw_corner(xmin, ymin, xmax, ymax, 'bottom_right')
+    for corner in ['top_left', 'top_right', 'bottom_left', 'bottom_right']:
+        draw_corner(xmin, ymin, xmax, ymax, corner)
     
-    # Prepare label with confidence
+    # Prepare and draw label
     label_text = f"{label} ({confidence:.2f})"
     if confidence_level == "Low Confidence":
         label_text += " ⚠️"
     
-    # Get text size
     (text_w, text_h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
     
-    # Draw label background with gradient effect
+    # Draw label background with gradient
     gradient_height = text_h + 2 * padding
     for i in range(gradient_height):
         alpha = 1 - (i / gradient_height) * 0.3
@@ -210,7 +224,6 @@ def detect_and_predict(image, interpreter):
                             predicted_label = class_labels[np.argmax(prediction)]
                             confidence = np.max(prediction)
                             
-                            # Draw fancy bounding box
                             image_np = draw_fancy_bbox(
                                 image_np,
                                 (xmin, ymin, xmax, ymax),
@@ -219,7 +232,6 @@ def detect_and_predict(image, interpreter):
                                 confidence_level
                             )
                             
-                            # Store detection results
                             st.session_state['detection_history'].append({
                                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 'prediction': predicted_label,
@@ -231,33 +243,6 @@ def detect_and_predict(image, interpreter):
     st.session_state['processing_time'].append(processing_time)
     
     return Image.fromarray(image_np), faces_detected, processing_time
-
-def process_camera_input():
-    """Handle camera input using Streamlit's native camera component"""
-    camera_image = st.camera_input("Take a picture")
-    
-    if camera_image is not None:
-        # Convert the file buffer to image
-        image = Image.open(camera_image)
-        image = image.convert("RGB")
-        
-        # Process image
-        processed_image, faces, proc_time = detect_and_predict(image, interpreter)
-        
-        # Display results
-        st.image(processed_image, 
-                caption=f"Detected {faces} faces in {proc_time:.3f}s",
-                use_container_width=True)
-        
-        # Add download button for processed image
-        buf = io.BytesIO()
-        processed_image.save(buf, format="PNG")
-        st.download_button(
-            label="Download Processed Image",
-            data=buf.getvalue(),
-            file_name="processed_image.png",
-            mime="image/png"
-        )
 
 def main():
     # Sidebar for settings and statistics
@@ -284,16 +269,22 @@ def main():
     # Main content
     st.title("😷 Advanced Face Mask Detection System")
     st.markdown("""
-        This system uses AI to detect face masks in images and live video feeds.
+        This system uses AI to detect face masks in real-time video feeds and uploaded images.
         Choose your preferred input method below.
     """)
     
     # Tabs for different input methods
-    tab1, tab2 = st.tabs(["📷 Camera Input", "📁 File Upload"])
+    tab1, tab2 = st.tabs(["📹 Live Video", "📁 File Upload"])
     
     with tab1:
-        st.subheader("Camera Detection")
-        process_camera_input()
+        st.subheader("Real-time Detection")
+        webrtc_ctx = webrtc_streamer(
+            key="mask-detection",
+            video_processor_factory=lambda: VideoProcessor(interpreter),
+            rtc_configuration=RTCConfiguration(
+                {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+            )
+        )
     
     with tab2:
         st.subheader("Image Upload")
@@ -318,16 +309,6 @@ def main():
                     st.image(processed_image, 
                             caption=f"Detected Image ({faces} faces, {proc_time:.3f}s)",
                             use_container_width=True)
-                
-                # Add download button for processed image
-                buf = io.BytesIO()
-                processed_image.save(buf, format="PNG")
-                btn = st.download_button(
-                    label="Download Processed Image",
-                    data=buf.getvalue(),
-                    file_name="processed_image.png",
-                    mime="image/png"
-                )
                 
             except Exception as e:
                 st.error(f"Error processing image: {str(e)}")
